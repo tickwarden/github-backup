@@ -50,7 +50,7 @@ jobs:
         run: |
           echo '::warning::Public repository: encrypted 7z enabled; unencrypted ZIP skipped. No visibility change required.'
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -193,7 +193,7 @@ jobs:
         run: '"$RUNNER_TEMP/tools/bin/python" -u scripts/verify.py'
 
       - name: Güvenli checkpoint — yalnız kontrolden geçen şifreli veri
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@v7
         with:
           name: checked-checkpoint-${{ matrix.account }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/approved-${{ matrix.account }}/
@@ -203,7 +203,7 @@ jobs:
 
       - name: İstenmişse güvenli ZIP checkpoint
         if: ${{ inputs.plaintext_zip && github.event.repository.private }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@v7
         with:
           name: UNENCRYPTED-checkpoint-${{ matrix.account }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/plaintext-${{ matrix.account }}/
@@ -213,7 +213,7 @@ jobs:
 
       - name: İçerik içermeyen tarama raporu
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@v7
         with:
           name: scan-report-${{ matrix.account }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/report-${{ matrix.account }}/
@@ -240,7 +240,7 @@ jobs:
         account: [tickwarden, IronCrest-sudo]
     steps:
       - name: Kontrolden geçmiş checkpoint'i al
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@v8
         with:
           pattern: checked-checkpoint-${{ matrix.account }}-${{ github.run_id }}-*
           path: delivery
