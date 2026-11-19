@@ -1,25 +1,29 @@
-# Bölünmüş yedekleme ve tekrar toplama olmadan teşhis
+# GitHub hesap yedekleri — hosted runner sürümü
 
-## Gereklilik — önce okuyun
-Bu sürüm GitHub-hosted ubuntu runner DEĞİL; size ait kalıcı diskli, yalnız bu özel/güvenilir repo tarafından kullanılan Linux x64 self-hosted runner gerektirir. GitHub Settings → Actions → Runners üzerinden kurun. **Yalnız bir runner'a `private-backup` etiketi verin.** Bütün job'lar aynı makine ve aynı kullanıcı HOME dizininde çalışmalıdır. Bu runner'ı güvenilmeyen PR kodları veya başka kullanıcılarla paylaşmayın. Boş disk kapasitesini takip edin.
+Bu sürüm GitHub-hosted Ubuntu 24.04 üzerinde çalışır; self-hosted runner gerekmez.
 
-Runner PATH üzerinde python3, github-backup==0.67.0, py7zr==1.0.0, git, git-lfs, 7z, gh, curl, jq, rsync bulunmalı. Python paketlerini bir sanal ortama kurup runner servisinin PATH'ine bu ortamın bin dizinini ekleyin. Mevcut dört hesap token/parola secret'ı korunur. Parolalar en az 20 karakter olmalı.
+## İş akışı
+1. Sentetik verilerle regresyon testleri.
+2. Her hesap için bağımsız yedekleme + güvenlik taraması.
+3. Yalnız kontrolden geçen çıktı için güvenli artifact checkpoint.
+4. Ayrı teslim job'unda checkpoint indirme ve SHA-256 kontrolü.
 
-## Kurulum
-Tüm `.github/` ve `scripts/` dosyalarını repoda güncelleyin. Yeni workflow başlatın; ilk çalıştırmada capture_id boş olmalı. `plaintext_zip` isteğe bağlıdır.
+**Yedekleme yalnız özel repoda başlar.** Public repoda özel kod, depo isimleri veya şifresiz ZIP yayımlanmaması için capture engellenir. Testler public repoda çalışabilir. Repo görünürlüğü workflow tarafından değiştirilmez.
 
-## Ayrı job'lar
-Her hesap için capture → verify → publish olmak üzere toplam 6 job vardır. Bir hesabın başarısızlığı diğer hesabın yayınını engellemez. Capture bir kez başarılıysa yerel CAPTURE_OK işareti yazılır. Verify hatası capture verisini silmez. Kontrolü geçmeyen arşiv, raw log veya repository verisi artifact olarak yüklenmez.
+Secrets: TICKWARDEN_BACKUP_TOKEN, IRONCREST_BACKUP_TOKEN, TICKWARDEN_BACKUP_PASSPHRASE, IRONCREST_BACKUP_PASSPHRASE. Parolalar en az 20 karakter. Mevcut secret'lar korunur.
 
-Veriler `$HOME/.private-github-backups/OWNER_REPO/CAPTURE_ID/ACCOUNT` altında kalır. Yerel SCAN-FINDING.json kalıbın kategorisini ve göreli dosya yolunu içerir; eşleşen içerik/parola/token yoktur. Bu rapor özel disk üzerinde elle incelenmelidir. Konsola sadece kategori yazılır. Bu rapor tüm bulguların listesi değildir; ilk kalıp eşleşmesini gösterir. İçeriklerin tamamını sohbet/loga taşımayın.
+Actions → GitHub hesap yedekleri → Run workflow. `plaintext_zip` varsayılan kapalıdır; açılırsa özel kod içeren şifresiz ZIP ayrıca bir gün saklanır. Şifreli 7z checkpoint yedi gün saklanır. Drive yüklemesi dahil değildir.
 
-## Hata sonrası tekrar
-- Kod değişmediyse Re-run failed jobs: capture job'u yeniden çalışmadan verify tekrar çalışır.
-- Teşhis kodunu güncellediyseniz **Run workflow** ile yeni run başlatın ve `capture_id` alanına eski capture'ın sayısal run ID'sini yazın. Başarılı capture aynı makinede bulunursa yeniden toplama yapılmaz.
-- Önceki GitHub-hosted run'ın temizlenmiş dosyalarını bu yöntem geri getiremez. İlk kalıcı capture bir defaya mahsus tekrar alınmalıdır.
-- Bilinen token/parola ve kalıp taraması engelleri kaldırılmaz. CREDENTIAL_PATTERN_FOUND gerçek anahtar veya örnek metin olabilir; inceleme olmadan otomatik istisna verilmez. Bu paket iş akışını düzeltir; gerçek veri bulgusunun çözüldüğünü iddia etmez.
+## Bulgular ve kısmi kapsam
+Dosyalar ve tespit edilen bare Git depolarındaki çözülmüş Git nesneleri, mevcut token/parolayla tam eşleşme ve bazı gizli bilgi kalıpları için taranır. Bu bütün olası sırları/nested arşivleri tespit eden kapsamlı güvenlik garantisi değildir.
 
-## Gizlilik ve sınırlar
-Raw loglar ve doğrulanmamış yedekler yerelde saklanır, otomatik silinmez. Yetkili kullanıcı disk temizliği ve saklama politikasından sorumludur. Diskte bu veriler şifresiz çalışma kopyaları da içerebilir; disk şifrelemesi ve özel kullanıcı hesabı kullanın. GitHub artifact'leri yalnız verify başarılıysa yayımlanır; şifreli 7z 7 gün, isteğe bağlı şifresiz ZIP 1 gün saklanır. Drive otomasyonu yoktur. Tam Git geçmişi secret taraması, tam erişilebilir kuruluş kapsamı veya restore doğrulaması iddiası yoktur. Links/özel dosyalar reddedilir.
+Bir repository biriminde bulgu varsa o deponun **tamamı** teslimden çıkarılır; bulgu bastırılmaz, Git geçmişi değiştirilmez. Diğer temiz birimler `PARTIAL` adıyla teslim edilir. SCAN-REPORT.json / COVERAGE.json bulgu kategorisini, repository birimini ve eşleşen yolun hash'ini içerir; eşleşen içerik/token/parola yer almaz. Örnek metin bile olsa manuel inceleme olmadan istisna tanınmaz.
 
-Sözdizimi kontrolleri yapıldı; bu yeni workflow gerçek self-hosted runner üzerinde test edilmedi. İlk çalıştırmayı izleyin. Repo/GitHub verisi silme veya OAuth grant iptali yoktur.
+Hesap metadata'sında veya eşlenemeyen bir alanda bulgu varsa tüm hesabın yayını engellenir. Hesaplar bağımsızdır; biri engellenince diğeri iptal edilmez. Tam yedek/restore garantisi verilmez. Kullanıcı hedefi kapsamı, tüm erişilebilir kuruluşların bağımsız tam yedeği anlamına gelmez. Eski inventory dosyaları dışlanan depoları anabilir; teslimin gerçek kapsamı DELIVERY-COVERAGE.json dosyasıdır.
+
+## Yeniden deneme
+Teslim kontrolü başarısızsa Re-run failed jobs mevcut güvenli checkpoint'i kullanır; yeniden capture gerekmez. Capture+scan başarısızsa GitHub-hosted disk kalıcı olmadığından yeniden veri toplamak gerekebilir. Kontrolden geçmemiş/withheld veri sadece yeniden deneme kolaylığı için artifact'e yüklenmez. Her aşamanın koşulsuz kalıcı tutulduğu iddia edilmez.
+
+Ham loglar yayımlanmaz. İlerleme her 30 saniyede Actions loguna sayaç olarak yazılır; on dakika değişim yoksa uyarı verilir. Yedekleme komutu dört saatte durdurulur. 7z parolayı alt süreç argümanında kullandığından yalnız güvenilir, tek kiracılı hosted runner kullanılmalıdır. Symlink/özel dosyalar reddedilir. Şifresiz ZIP tüm Unix metadata'sını korumaz.
+
+Eski self-hosted kullanım belgeleri ve yardımcı dosyalar bu sürüm için geçerli değildir; etkin workflow `.github/workflows/backup.yml` ve bu README'dir. Workflow çıkış yapmaz veya OAuth grant iptal etmez.

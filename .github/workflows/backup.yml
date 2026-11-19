@@ -1,260 +1,217 @@
-name: Kalıcı ve bölünmüş hesap yedekleme
+name: GitHub hesap yedekleri
 on:
   workflow_dispatch:
     inputs:
-      capture_id:
-        description: 'Eski capture için run ID; yeni yedek için boş bırakın'
-        type: string
-        default: ''
       plaintext_zip:
-        description: 'Şifresiz ZIP de üret'
+        description: 'Şifresiz ZIP de üret (özel kod içerir)'
         type: boolean
         default: false
 permissions:
   contents: read
 concurrency:
-  group: persistent-private-backup
+  group: hosted-private-backup
   cancel-in-progress: false
 jobs:
-  tick_capture:
-    runs-on: [self-hosted, linux, x64, private-backup]
-    timeout-minutes: 245
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Test bağımlılıkları
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full
+          python3 -m venv "$RUNNER_TEMP/test-tools"
+          "$RUNNER_TEMP/test-tools/bin/pip" install py7zr==1.0.0
+      - name: Gerçek 7z ve güvenlik regresyon testleri
+        run: '"$RUNNER_TEMP/test-tools/bin/python" -m unittest discover -s tests -v'
+  tick_backup_scan:
+    name: tickwarden — yedekle ve güvenlik kontrolü
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
     env:
       ACCOUNT: tickwarden
       GH_TOKEN: ${{ secrets.TICKWARDEN_BACKUP_TOKEN }}
       ARCHIVE_PASSWORD: ${{ secrets.TICKWARDEN_BACKUP_PASSPHRASE }}
       PLAINTEXT_ZIP: ${{ inputs.plaintext_zip }}
-      CAPTURE_ID_INPUT: ${{ inputs.capture_id }}
     steps:
+      - name: Özel yedekler için repo gizliliğini kontrol et
+        env:
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ "$REPOSITORY_PRIVATE" != true ]; then
+            echo '::error::Backup publication blocked: this repository is public. Use a private repository. No capture started.'
+            exit 1
+          fi
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Kalıcı özel dizini seç
-        shell: bash
+      - name: Bağımlılıklar
+        env:
+          GH_TOKEN: ''
+          ARCHIVE_PASSWORD: ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full git-lfs jq curl rsync python3-venv
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install github-backup==0.67.0 py7zr==1.0.0
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+      - name: Hesap kontrolü
         run: |
           set -euo pipefail
-          umask 077
-          key="${CAPTURE_ID_INPUT:-${GITHUB_RUN_ID}}"
-          [[ "$key" =~ ^[0-9]+$ ]] || exit 1
-          repo="${GITHUB_REPOSITORY//\//_}"
-          base="$HOME/.private-github-backups/$repo/$key/$ACCOUNT"
-          mkdir -p "$base"
-          chmod 700 "$HOME/.private-github-backups" "$base"
-          echo "BACKUP_STATE=$base" >> "$GITHUB_ENV"
-          echo "CAPTURE_ID=$key" >> "$GITHUB_ENV"
-          echo "Capture ID: $key; account: $ACCOUNT"
-      - name: Ön kontroller
-        shell: bash
-        run: |
-          set -euo pipefail
-          command -v 7z; command -v gh; command -v github-backup
-          python3 -c 'import py7zr'
           test -n "$GH_TOKEN"
           test "${#ARCHIVE_PASSWORD}" -ge 20
-          if [ -f "$BACKUP_STATE/CAPTURE_OK" ]; then
-            echo 'Existing capture found; current token identity lookup not required to reuse.'
-          else
-            actual="$(gh api user --jq .login)"
-            test "${actual,,}" = "${ACCOUNT,,}"
-            test -z "$CAPTURE_ID_INPUT" || { echo 'Requested prior capture is missing. Refusing unexpected recapture.'; exit 1; }
-          fi
-      - name: Yeni yedek al veya mevcut capture kullan
-        run: RUNNER_TEMP="$BACKUP_STATE" bash scripts/capture-persistent.sh
-  tick_verify:
-    needs: tick_capture
-    runs-on: [self-hosted, linux, x64, private-backup]
-    timeout-minutes: 90
-    env:
-      ACCOUNT: tickwarden
-      GH_TOKEN: ${{ secrets.TICKWARDEN_BACKUP_TOKEN }}
-      ARCHIVE_PASSWORD: ${{ secrets.TICKWARDEN_BACKUP_PASSPHRASE }}
-      PLAINTEXT_ZIP: ${{ inputs.plaintext_zip }}
-      CAPTURE_ID_INPUT: ${{ inputs.capture_id }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+          actual="$(gh api user --jq .login)"
+          test "${actual,,}" = "${ACCOUNT,,}"
+      - name: Yedekle — 30 saniyede bir güvenli ilerleme logu
+        timeout-minutes: 245
+        run: python3 -u scripts/run-with-progress.py
+      - name: Doğrula — bulgulu depoları bütün olarak ayır
+        timeout-minutes: 90
+        run: '"$RUNNER_TEMP/tools/bin/python" -u scripts/verify.py'
+      - name: Güvenli checkpoint — yalnız kontrolden geçen şifreli veri
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          persist-credentials: false
-      - name: Kalıcı özel dizini seç
-        shell: bash
+          name: checked-checkpoint-tickwarden-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/approved-tickwarden/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: İstenmişse güvenli ZIP checkpoint
+        if: ${{ inputs.plaintext_zip }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: UNENCRYPTED-checkpoint-tickwarden-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/plaintext-tickwarden/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: İçerik içermeyen tarama raporu
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: scan-report-tickwarden-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/report-tickwarden/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Geçici özel dosyaları temizle
+        if: ${{ always() }}
         run: |
-          set -euo pipefail
-          umask 077
-          key="${CAPTURE_ID_INPUT:-${GITHUB_RUN_ID}}"
-          [[ "$key" =~ ^[0-9]+$ ]] || exit 1
-          repo="${GITHUB_REPOSITORY//\//_}"
-          base="$HOME/.private-github-backups/$repo/$key/$ACCOUNT"
-          mkdir -p "$base"
-          chmod 700 "$HOME/.private-github-backups" "$base"
-          echo "BACKUP_STATE=$base" >> "$GITHUB_ENV"
-          echo "CAPTURE_ID=$key" >> "$GITHUB_ENV"
-          echo "Capture ID: $key; account: $ACCOUNT"
-      - name: Aynı yedeği denetle (yeniden toplama yok)
-        run: |
-          test -f "$BACKUP_STATE/CAPTURE_OK"
-          RUNNER_TEMP="$BACKUP_STATE" python3 scripts/verify.py
+          rm -rf -- "$RUNNER_TEMP/backup-$ACCOUNT" "$RUNNER_TEMP/out-$ACCOUNT" "$RUNNER_TEMP/approved-$ACCOUNT" "$RUNNER_TEMP/plaintext-$ACCOUNT"
+          rm -f -- "$RUNNER_TEMP/raw-$ACCOUNT.log"
   tick_publish:
-    needs: tick_verify
-    runs-on: [self-hosted, linux, x64, private-backup]
-    timeout-minutes: 90
-    env:
-      ACCOUNT: tickwarden
-      GH_TOKEN: ${{ secrets.TICKWARDEN_BACKUP_TOKEN }}
-      ARCHIVE_PASSWORD: ${{ secrets.TICKWARDEN_BACKUP_PASSPHRASE }}
-      PLAINTEXT_ZIP: ${{ inputs.plaintext_zip }}
-      CAPTURE_ID_INPUT: ${{ inputs.capture_id }}
+    name: tickwarden — ayrı job ile teslim kontrolü
+    needs: tick_backup_scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Kontrolden geçmiş checkpoint'i al
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          persist-credentials: false
-      - name: Kalıcı özel dizini seç
+          pattern: checked-checkpoint-tickwarden-${{ github.run_id }}-*
+          path: delivery
+          merge-multiple: true
+      - name: SHA-256 ve kapsamı logda doğrula
         shell: bash
         run: |
           set -euo pipefail
-          umask 077
-          key="${CAPTURE_ID_INPUT:-${GITHUB_RUN_ID}}"
-          [[ "$key" =~ ^[0-9]+$ ]] || exit 1
-          repo="${GITHUB_REPOSITORY//\//_}"
-          base="$HOME/.private-github-backups/$repo/$key/$ACCOUNT"
-          mkdir -p "$base"
-          chmod 700 "$HOME/.private-github-backups" "$base"
-          echo "BACKUP_STATE=$base" >> "$GITHUB_ENV"
-          echo "CAPTURE_ID=$key" >> "$GITHUB_ENV"
-          echo "Capture ID: $key; account: $ACCOUNT"
-      - name: Kontrolü geçen şifreli 7z
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: encrypted-${{ env.ACCOUNT }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.BACKUP_STATE }}/approved-${{ env.ACCOUNT }}/
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-      - name: İstenmişse şifresiz ZIP
-        if: ${{ inputs.plaintext_zip }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: UNENCRYPTED-${{ env.ACCOUNT }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.BACKUP_STATE }}/plaintext-${{ env.ACCOUNT }}/
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-  iron_capture:
-    runs-on: [self-hosted, linux, x64, private-backup]
-    timeout-minutes: 245
+          cd delivery
+          sha256sum -c -- *.sha256
+          python3 -c 'import json; d=json.load(open("COVERAGE.json")); print("Coverage:", d["status"], "Withheld repositories:", len(d.get("withheld_repository_units", [])), "Full backup verified:", d["complete_backup_verified"])'
+  iron_backup_scan:
+    name: IronCrest-sudo — yedekle ve güvenlik kontrolü
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
     env:
       ACCOUNT: IronCrest-sudo
       GH_TOKEN: ${{ secrets.IRONCREST_BACKUP_TOKEN }}
       ARCHIVE_PASSWORD: ${{ secrets.IRONCREST_BACKUP_PASSPHRASE }}
       PLAINTEXT_ZIP: ${{ inputs.plaintext_zip }}
-      CAPTURE_ID_INPUT: ${{ inputs.capture_id }}
     steps:
+      - name: Özel yedekler için repo gizliliğini kontrol et
+        env:
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ "$REPOSITORY_PRIVATE" != true ]; then
+            echo '::error::Backup publication blocked: this repository is public. Use a private repository. No capture started.'
+            exit 1
+          fi
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Kalıcı özel dizini seç
-        shell: bash
+      - name: Bağımlılıklar
+        env:
+          GH_TOKEN: ''
+          ARCHIVE_PASSWORD: ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full git-lfs jq curl rsync python3-venv
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install github-backup==0.67.0 py7zr==1.0.0
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+      - name: Hesap kontrolü
         run: |
           set -euo pipefail
-          umask 077
-          key="${CAPTURE_ID_INPUT:-${GITHUB_RUN_ID}}"
-          [[ "$key" =~ ^[0-9]+$ ]] || exit 1
-          repo="${GITHUB_REPOSITORY//\//_}"
-          base="$HOME/.private-github-backups/$repo/$key/$ACCOUNT"
-          mkdir -p "$base"
-          chmod 700 "$HOME/.private-github-backups" "$base"
-          echo "BACKUP_STATE=$base" >> "$GITHUB_ENV"
-          echo "CAPTURE_ID=$key" >> "$GITHUB_ENV"
-          echo "Capture ID: $key; account: $ACCOUNT"
-      - name: Ön kontroller
-        shell: bash
-        run: |
-          set -euo pipefail
-          command -v 7z; command -v gh; command -v github-backup
-          python3 -c 'import py7zr'
           test -n "$GH_TOKEN"
           test "${#ARCHIVE_PASSWORD}" -ge 20
-          if [ -f "$BACKUP_STATE/CAPTURE_OK" ]; then
-            echo 'Existing capture found; current token identity lookup not required to reuse.'
-          else
-            actual="$(gh api user --jq .login)"
-            test "${actual,,}" = "${ACCOUNT,,}"
-            test -z "$CAPTURE_ID_INPUT" || { echo 'Requested prior capture is missing. Refusing unexpected recapture.'; exit 1; }
-          fi
-      - name: Yeni yedek al veya mevcut capture kullan
-        run: RUNNER_TEMP="$BACKUP_STATE" bash scripts/capture-persistent.sh
-  iron_verify:
-    needs: iron_capture
-    runs-on: [self-hosted, linux, x64, private-backup]
-    timeout-minutes: 90
-    env:
-      ACCOUNT: IronCrest-sudo
-      GH_TOKEN: ${{ secrets.IRONCREST_BACKUP_TOKEN }}
-      ARCHIVE_PASSWORD: ${{ secrets.IRONCREST_BACKUP_PASSPHRASE }}
-      PLAINTEXT_ZIP: ${{ inputs.plaintext_zip }}
-      CAPTURE_ID_INPUT: ${{ inputs.capture_id }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Kalıcı özel dizini seç
-        shell: bash
-        run: |
-          set -euo pipefail
-          umask 077
-          key="${CAPTURE_ID_INPUT:-${GITHUB_RUN_ID}}"
-          [[ "$key" =~ ^[0-9]+$ ]] || exit 1
-          repo="${GITHUB_REPOSITORY//\//_}"
-          base="$HOME/.private-github-backups/$repo/$key/$ACCOUNT"
-          mkdir -p "$base"
-          chmod 700 "$HOME/.private-github-backups" "$base"
-          echo "BACKUP_STATE=$base" >> "$GITHUB_ENV"
-          echo "CAPTURE_ID=$key" >> "$GITHUB_ENV"
-          echo "Capture ID: $key; account: $ACCOUNT"
-      - name: Aynı yedeği denetle (yeniden toplama yok)
-        run: |
-          test -f "$BACKUP_STATE/CAPTURE_OK"
-          RUNNER_TEMP="$BACKUP_STATE" python3 scripts/verify.py
-  iron_publish:
-    needs: iron_verify
-    runs-on: [self-hosted, linux, x64, private-backup]
-    timeout-minutes: 90
-    env:
-      ACCOUNT: IronCrest-sudo
-      GH_TOKEN: ${{ secrets.IRONCREST_BACKUP_TOKEN }}
-      ARCHIVE_PASSWORD: ${{ secrets.IRONCREST_BACKUP_PASSPHRASE }}
-      PLAINTEXT_ZIP: ${{ inputs.plaintext_zip }}
-      CAPTURE_ID_INPUT: ${{ inputs.capture_id }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Kalıcı özel dizini seç
-        shell: bash
-        run: |
-          set -euo pipefail
-          umask 077
-          key="${CAPTURE_ID_INPUT:-${GITHUB_RUN_ID}}"
-          [[ "$key" =~ ^[0-9]+$ ]] || exit 1
-          repo="${GITHUB_REPOSITORY//\//_}"
-          base="$HOME/.private-github-backups/$repo/$key/$ACCOUNT"
-          mkdir -p "$base"
-          chmod 700 "$HOME/.private-github-backups" "$base"
-          echo "BACKUP_STATE=$base" >> "$GITHUB_ENV"
-          echo "CAPTURE_ID=$key" >> "$GITHUB_ENV"
-          echo "Capture ID: $key; account: $ACCOUNT"
-      - name: Kontrolü geçen şifreli 7z
+          actual="$(gh api user --jq .login)"
+          test "${actual,,}" = "${ACCOUNT,,}"
+      - name: Yedekle — 30 saniyede bir güvenli ilerleme logu
+        timeout-minutes: 245
+        run: python3 -u scripts/run-with-progress.py
+      - name: Doğrula — bulgulu depoları bütün olarak ayır
+        timeout-minutes: 90
+        run: '"$RUNNER_TEMP/tools/bin/python" -u scripts/verify.py'
+      - name: Güvenli checkpoint — yalnız kontrolden geçen şifreli veri
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: encrypted-${{ env.ACCOUNT }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.BACKUP_STATE }}/approved-${{ env.ACCOUNT }}/
+          name: checked-checkpoint-IronCrest-sudo-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/approved-IronCrest-sudo/
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
-      - name: İstenmişse şifresiz ZIP
+      - name: İstenmişse güvenli ZIP checkpoint
         if: ${{ inputs.plaintext_zip }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: UNENCRYPTED-${{ env.ACCOUNT }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.BACKUP_STATE }}/plaintext-${{ env.ACCOUNT }}/
+          name: UNENCRYPTED-checkpoint-IronCrest-sudo-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/plaintext-IronCrest-sudo/
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+      - name: İçerik içermeyen tarama raporu
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: scan-report-IronCrest-sudo-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/report-IronCrest-sudo/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Geçici özel dosyaları temizle
+        if: ${{ always() }}
+        run: |
+          rm -rf -- "$RUNNER_TEMP/backup-$ACCOUNT" "$RUNNER_TEMP/out-$ACCOUNT" "$RUNNER_TEMP/approved-$ACCOUNT" "$RUNNER_TEMP/plaintext-$ACCOUNT"
+          rm -f -- "$RUNNER_TEMP/raw-$ACCOUNT.log"
+  iron_publish:
+    name: IronCrest-sudo — ayrı job ile teslim kontrolü
+    needs: iron_backup_scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Kontrolden geçmiş checkpoint'i al
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: checked-checkpoint-IronCrest-sudo-${{ github.run_id }}-*
+          path: delivery
+          merge-multiple: true
+      - name: SHA-256 ve kapsamı logda doğrula
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd delivery
+          sha256sum -c -- *.sha256
+          python3 -c 'import json; d=json.load(open("COVERAGE.json")); print("Coverage:", d["status"], "Withheld repositories:", len(d.get("withheld_repository_units", [])), "Full backup verified:", d["complete_backup_verified"])'
