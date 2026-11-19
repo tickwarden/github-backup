@@ -27,7 +27,7 @@ jobs:
       PLAINTEXT_ZIP: ${{ inputs.plaintext_zip }}
     steps:
       - name: Workflow dosyalarını al
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Bağımlılıklar
@@ -55,7 +55,7 @@ jobs:
         run: |
           "$RUNNER_TEMP/tools/bin/python" scripts/verify.py
       - name: Yalnızca kontrolü geçen şifreli çıktıyı sakla
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v7
         with:
           name: encrypted-backup-${{ matrix.account }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/approved-${{ matrix.account }}/
@@ -64,7 +64,7 @@ jobs:
           compression-level: 0
       - name: İstenmişse şifresiz ZIP sakla
         if: ${{ success() && inputs.plaintext_zip }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v7
         with:
           name: UNENCRYPTED-backup-${{ matrix.account }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/plaintext-${{ matrix.account }}/
