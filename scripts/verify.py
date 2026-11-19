@@ -53,7 +53,13 @@ with tempfile.TemporaryDirectory(dir=root,prefix='verify-7z-') as tmp:
                     for chunk in iter(lambda:inp.read(1048576),b''):
                         data=tail+chunk
                         if any(secret in data for secret in secrets):raise ValueError('Known credential found')
-                        if pattern.search(data):raise ValueError('Credential pattern found')
+                        if pattern.search(data):
+                            match=pattern.search(data)
+                            category='PRIVATE_KEY_MARKER' if match.group().startswith(b'-----BEGIN') else 'TOKEN_SHAPED_STRING'
+                            finding={'category':category,'relative_path':p.relative_to(dest).as_posix(),'content_not_included':True,'automatic_bypass':False}
+                            (root/'SCAN-FINDING.json').write_text(json.dumps(finding,indent=2))
+                            print('SCAN_FINDING category='+category+'; details saved locally in SCAN-FINDING.json; no content printed.',flush=True)
+                            raise ValueError('Credential pattern found')
                         tail=data[-4096:]
                 files.append(p)
         if not files:raise ValueError('Empty archive')
@@ -73,12 +79,12 @@ with tempfile.TemporaryDirectory(dir=root,prefix='verify-7z-') as tmp:
                 if z.testzip() is not None:raise ValueError('ZIP CRC failed')
         stage='publish_preparation'
         print('VERIFY_STAGE '+stage,flush=True)
-        approved=root/f'approved-{account}';approved.mkdir(mode=0o700)
+        approved=root/f'approved-{account}';shutil.rmtree(approved,ignore_errors=True);approved.mkdir(mode=0o700)
         shutil.copy2(archive,approved/archive.name);checksum(approved/archive.name)
         manifest['encrypted_7z_integrity_verified']=True
         (approved/'COVERAGE.json').write_text(json.dumps(manifest,indent=2))
         if os.environ.get('PLAINTEXT_ZIP','').lower()=='true':
-            target=root/f'plaintext-{account}';target.mkdir(mode=0o700)
+            target=root/f'plaintext-{account}';shutil.rmtree(target,ignore_errors=True);target.mkdir(mode=0o700)
             shutil.copy2(plain,target/plain.name);checksum(target/plain.name)
             (target/'COVERAGE.json').write_text(json.dumps(dict(manifest,unencrypted=True,zip_crc_verified=True),indent=2))
     except Exception as error:

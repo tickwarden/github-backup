@@ -1,27 +1,25 @@
-# GitHub Actions: parolalı 7z + isteğe bağlı şifresiz ZIP
+# Bölünmüş yedekleme ve tekrar toplama olmadan teşhis
 
-Paketin tüm dosyalarını, gizli `.github` dizini dahil, güvendiğiniz özel repoya ekleyin. Eski `scripts/plaintext-zip.py` artık kullanılmıyor.
+## Gereklilik — önce okuyun
+Bu sürüm GitHub-hosted ubuntu runner DEĞİL; size ait kalıcı diskli, yalnız bu özel/güvenilir repo tarafından kullanılan Linux x64 self-hosted runner gerektirir. GitHub Settings → Actions → Runners üzerinden kurun. **Yalnız bir runner'a `private-backup` etiketi verin.** Bütün job'lar aynı makine ve aynı kullanıcı HOME dizininde çalışmalıdır. Bu runner'ı güvenilmeyen PR kodları veya başka kullanıcılarla paylaşmayın. Boş disk kapasitesini takip edin.
 
-## Secrets
-- TICKWARDEN_BACKUP_TOKEN
-- IRONCREST_BACKUP_TOKEN
-- TICKWARDEN_BACKUP_PASSPHRASE
-- IRONCREST_BACKUP_PASSPHRASE
+Runner PATH üzerinde python3, github-backup==0.67.0, py7zr==1.0.0, git, git-lfs, 7z, gh, curl, jq, rsync bulunmalı. Python paketlerini bir sanal ortama kurup runner servisinin PATH'ine bu ortamın bin dizinini ekleyin. Mevcut dört hesap token/parola secret'ı korunur. Parolalar en az 20 karakter olmalı.
 
-Mevcut parola secret'ları aynen kullanılır. En az 20 karakter; rastgele ASCII parola tercih edin. Token doğru hesaba ve gereken okuma erişimlerine sahip olmalı. GITHUB_TOKEN hesapların tüm özel verilerinin yerine geçmez. Parolaları ayrıca güvenli saklayın.
+## Kurulum
+Tüm `.github/` ve `scripts/` dosyalarını repoda güncelleyin. Yeni workflow başlatın; ilk çalıştırmada capture_id boş olmalı. `plaintext_zip` isteğe bağlıdır.
 
-Actions → GitHub hesap yedekleri → Run workflow. Şifresiz ZIP de isterseniz `plaintext_zip` kutusunu açın. Yeni çalıştırma gerekir.
+## Ayrı job'lar
+Her hesap için capture → verify → publish olmak üzere toplam 6 job vardır. Bir hesabın başarısızlığı diğer hesabın yayınını engellemez. Capture bir kez başarılıysa yerel CAPTURE_OK işareti yazılır. Verify hatası capture verisini silmez. Kontrolü geçmeyen arşiv, raw log veya repository verisi artifact olarak yüklenmez.
 
-Şifreli çıktı artık `.7z`; 7z arşiv başlık şifreleme (`-mhe=on`) kullanılır. GPG üretim/doğrulaması kullanılmaz; eski GPG arşivleri dönüştürülmez.
+Veriler `$HOME/.private-github-backups/OWNER_REPO/CAPTURE_ID/ACCOUNT` altında kalır. Yerel SCAN-FINDING.json kalıbın kategorisini ve göreli dosya yolunu içerir; eşleşen içerik/parola/token yoktur. Bu rapor özel disk üzerinde elle incelenmelidir. Konsola sadece kategori yazılır. Bu rapor tüm bulguların listesi değildir; ilk kalıp eşleşmesini gösterir. İçeriklerin tamamını sohbet/loga taşımayın.
 
-Şifreli artifact 7 gün, isteğe bağlı şifresiz ZIP artifact'i 1 gün saklanır. ZIP özel kodları parolasız içerir. Drive yüklemesi dahil değildir.
+## Hata sonrası tekrar
+- Kod değişmediyse Re-run failed jobs: capture job'u yeniden çalışmadan verify tekrar çalışır.
+- Teşhis kodunu güncellediyseniz **Run workflow** ile yeni run başlatın ve `capture_id` alanına eski capture'ın sayısal run ID'sini yazın. Başarılı capture aynı makinede bulunursa yeniden toplama yapılmaz.
+- Önceki GitHub-hosted run'ın temizlenmiş dosyalarını bu yöntem geri getiremez. İlk kalıcı capture bir defaya mahsus tekrar alınmalıdır.
+- Bilinen token/parola ve kalıp taraması engelleri kaldırılmaz. CREDENTIAL_PATTERN_FOUND gerçek anahtar veya örnek metin olabilir; inceleme olmadan otomatik istisna verilmez. Bu paket iş akışını düzeltir; gerçek veri bulgusunun çözüldüğünü iddia etmez.
 
-Her hesap ayrı job; stdout/Actions loguna 30 saniyede bir güvenli sayaçlar yazılır. Ham günlükler yayımlanmaz. 10 dakika değişim yoksa uyarı; yedekleme üst sınırı 4 saat. Başarısız çalışma ya da kontrol artifact yayınını engeller.
+## Gizlilik ve sınırlar
+Raw loglar ve doğrulanmamış yedekler yerelde saklanır, otomatik silinmez. Yetkili kullanıcı disk temizliği ve saklama politikasından sorumludur. Diskte bu veriler şifresiz çalışma kopyaları da içerebilir; disk şifrelemesi ve özel kullanıcı hesabı kullanın. GitHub artifact'leri yalnız verify başarılıysa yayımlanır; şifreli 7z 7 gün, isteğe bağlı şifresiz ZIP 1 gün saklanır. Drive otomasyonu yoktur. Tam Git geçmişi secret taraması, tam erişilebilir kuruluş kapsamı veya restore doğrulaması iddiası yoktur. Links/özel dosyalar reddedilir.
 
-7z bütünlük testi, şifreyle okuma ve temel token/parola/anahtar kalıbı taraması yapılır. Bu, sıkıştırılmış Git nesnelerindeki tüm geçmişi inceleyen tam gizli bilgi taraması DEĞİLDİR. Restore veya tam kapsam doğrulaması yoktur. Yalnız kullanıcı hedefleri; erişilebilir tüm kuruluşların ayrı tam yedeği değildir.
-
-Doğrulama geçici yerel şifresiz dosyalar açar. Symlink/özel dosya desteklenmez; güvenli ZIP dönüşümü için reddedilir. ZIP tüm Unix metadata özelliklerini korumaz. Geçici dosyalar iş bitiminde temizlenir; güvenli fiziksel silme garantisi yoktur.
-
-7z CLI parolayı alt sürecin argümanında kullanır; ham komutları/logları yayımlamayın. Yalnız GitHub-hosted geçici runner ve güvenilir özel repo kullanın; paylaşılan self-hosted runner için uygun değildir.
-
-GitHub üzerinde henüz çalıştırılmadı. Gömülü backup-org.sh v4.0 değiştirilmemiştir. İşlemler GitHub verisini silmez/geri yazmaz, OAuth grant iptali yapmaz.
+Sözdizimi kontrolleri yapıldı; bu yeni workflow gerçek self-hosted runner üzerinde test edilmedi. İlk çalıştırmayı izleyin. Repo/GitHub verisi silme veya OAuth grant iptali yoktur.
