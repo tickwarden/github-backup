@@ -129,6 +129,7 @@ def main():
         if len(archives) != 1:
             raise Blocked('ONE_ARCHIVE_REQUIRED')
         archive = archives[0]
+        print('ARCHIVE_INPUT bytes='+str(archive.stat().st_size),flush=True)
         with tempfile.TemporaryDirectory(dir=root, prefix='validated-') as tmp:
             tmp = Path(tmp)
             data = tmp / 'data'
@@ -143,6 +144,7 @@ def main():
                 validate_names([f.filename for f in info])
                 if any(getattr(f, 'is_symlink', False) for f in info):
                     raise Blocked('LINK_UNSUPPORTED')
+                print('ARCHIVE_EXTRACT entries='+str(len(info)),flush=True)
                 z.extractall(data)
             files = []
             for base, dirs, names in os.walk(data, followlinks=False):
@@ -164,6 +166,7 @@ def main():
                 nonlocal unsafe_global
                 rel = path.relative_to(data)
                 unit = unit_for(rel)
+                print('SCAN_FINDING category='+category+' source='+source+' unit_id='+hashlib.sha256((unit or 'account-metadata').encode()).hexdigest()[:12]+' action='+('withhold_whole_repository' if unit else 'block_account'),flush=True)
                 report['findings'].append({'unit': unit, 'path_sha256': hashlib.sha256(str(rel).encode()).hexdigest(),
                                            'category': category, 'source': source})
                 if unit:
@@ -183,12 +186,16 @@ def main():
             for head in data.rglob('HEAD'):
                 repo = head.parent
                 if head.is_file() and (repo / 'objects').is_dir() and (repo / 'config').is_file():
-                    for category in scan_git(repo, secrets):
+                    print('GIT_SCAN unit_id='+hashlib.sha256(str(repo.relative_to(data)).encode()).hexdigest()[:12]+' state=started',flush=True)
+                    categories=scan_git(repo, secrets)
+                    print('GIT_SCAN state=finished finding_categories='+str(len(categories)),flush=True)
+                    for category in categories:
                         finding(head, category, 'decoded_git_objects')
             report['withheld_repository_units'] = sorted(withheld)
             report['decoded_git_object_scan'] = True
             if unsafe_global:
                 raise Blocked('ACCOUNT_METADATA_OR_UNMAPPED_FINDING')
+            print('SCAN_RESULT files='+str(len(files))+' findings='+str(len(report['findings']))+' withheld_repositories='+str(len(withheld)),flush=True)
             stage = 'repack'
             # Never edit Git history or suppress a match: withhold the WHOLE unit.
             for unit in withheld:
@@ -205,12 +212,14 @@ def main():
             staged.mkdir()
             label = '-PARTIAL' if withheld or collection.get('exit_code') != 0 else '-CHECKED'
             output = staged / (account + label + '.7z')
+            print('ARCHIVE_REPACK state=started retained_files='+str(len(retained)),flush=True)
             result = subprocess.run(['7z', 'a', '-t7z', '-mhe=on', '-p' + password, '-bd', str(output), '.'],
                                     cwd=data, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, timeout=1800)
             if result.returncode:
                 raise Blocked('REPACK_FAILED')
             run7(['t', '-bd', str(output)], password)
+            print('ARCHIVE_REPACK state=verified bytes='+str(output.stat().st_size),flush=True)
             (staged / (output.name + '.sha256')).write_text(sha(output) + '  ' + output.name + '\n')
             (staged / 'COVERAGE.json').write_text(json.dumps(report, indent=2))
             dest = root / ('approved-' + account)

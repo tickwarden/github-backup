@@ -1,32 +1,21 @@
-# GitHub hesap yedekleri — hosted runner sürümü
+# GitHub hesap yedekleri
 
-Bu sürüm GitHub-hosted Ubuntu 24.04 üzerinde çalışır; self-hosted runner gerekmez.
+Actions → **GitHub hesap yedekleri → Run workflow** yeterlidir. Self-hosted runner veya private repo zorunlu değildir. Daha önce tanımlanan dört hesap token/parola secret'ı kullanılır.
 
-## İş akışı
-1. Sentetik verilerle regresyon testleri.
-2. Her hesap için bağımsız yedekleme + güvenlik taraması.
-3. Yalnız kontrolden geçen çıktı için güvenli artifact checkpoint.
-4. Ayrı teslim job'unda checkpoint indirme ve SHA-256 kontrolü.
+`scripts/` altında yalnız iki dosya vardır:
+- `backup-org.sh`: hesap verilerini toplar, parolalı 7z oluşturur.
+- `verify.py`: arşivi açıp doğrular, dosyaları ve Git nesnelerini tarar; güvenli çıktıyı hazırlar.
 
-**Private repo zorunlu değildir.** Public repoda şifreli 7z otomatik üretilir; şifresiz ZIP uyarıyla atlanır. Public tarama raporunda özel repository birim adları hash olarak gösterilir. Repo görünürlüğü değiştirilmez.
+İlerleme ve olay logları workflow içindedir; yardımcı betik gerekmez. Her 30 saniyede aşama, geçen süre, dosya sayısı, boyut, son log yazım yaşı gösterilir. Tanınan HTTP hata kodları ve retry/rate-limit olayları ayrıca yazılır. Bu olay sınıflandırması sezgiseldir; tüm API hatalarını tanıdığı iddia edilmez. Ham loglar, token/parola, içerik ve public loglarda özel depo isimleri gösterilmez.
 
-Secrets: TICKWARDEN_BACKUP_TOKEN, IRONCREST_BACKUP_TOKEN, TICKWARDEN_BACKUP_PASSPHRASE, IRONCREST_BACKUP_PASSPHRASE. Parolalar en az 20 karakter. Mevcut secret'lar korunur.
+Her hesabın yedekleme+tarama ve teslim kontrolü ayrı job'lardadır (toplam dört job). Bir hesabın hatası diğerini durdurmaz. Otomatik test job'u yoktur; `tests/` yalnız yerel regresyon testleri içindir.
 
-Actions → GitHub hesap yedekleri → Run workflow. `plaintext_zip` varsayılan kapalıdır; açılırsa özel kod içeren şifresiz ZIP ayrıca bir gün saklanır. Şifreli 7z checkpoint yedi gün saklanır. Drive yüklemesi dahil değildir.
+Uyarı nedeniyle hemen durdurma modu kapalıdır. Toplama hata verirse bağımsız doğrulama, kullanılabilir bir 7z adayı olup olmadığına bakar. Güvenli çıktı yoksa o hesap başarısız raporlanır; bozuk/güvensiz veri başarılıymış gibi teslim edilmez.
 
-## Bulgular ve kısmi kapsam
-Dosyalar ve tespit edilen bare Git depolarındaki çözülmüş Git nesneleri, mevcut token/parolayla tam eşleşme ve bazı gizli bilgi kalıpları için taranır. Bu bütün olası sırları/nested arşivleri tespit eden kapsamlı güvenlik garantisi değildir.
+Gizli bilgi kalıbı bulunan repository birimi bütünüyle dışarıda tutulur. Bulgu bastırılmaz, Git geçmişi değiştirilmez; kalan veri PARTIAL adıyla teslim edilir. Hesap metadata'sındaki bulgular tüm hesabın yayınını engeller. Bu tarama bütün olası sırları veya iç içe sıkıştırılmış formatları tespit eden bir garanti değildir. Tam kapsam ve restore doğrulaması yapılmış sayılmaz. Kullanıcı hedefi, erişilebilir tüm kuruluşların bağımsız tam yedeği demek değildir.
 
-Bir repository biriminde bulgu varsa o deponun **tamamı** teslimden çıkarılır; bulgu bastırılmaz, Git geçmişi değiştirilmez. Diğer temiz birimler `PARTIAL` adıyla teslim edilir. SCAN-REPORT.json / COVERAGE.json bulgu kategorisini, repository birimini ve eşleşen yolun hash'ini içerir; eşleşen içerik/token/parola yer almaz. Örnek metin bile olsa manuel inceleme olmadan istisna tanınmaz.
+Şifreli 7z checkpoint yedi gün saklanır. Şifresiz ZIP isteğe bağlıdır; private repoda bir gün saklanır, public repoda uyarıyla atlanır. Public tarama raporunda özel repository birim adları hash olarak gösterilir. Drive yüklemesi dahil değildir.
 
-Hesap metadata'sında veya eşlenemeyen bir alanda bulgu varsa tüm hesabın yayını engellenir. Hesaplar bağımsızdır; biri engellenince diğeri iptal edilmez. Tam yedek/restore garantisi verilmez. Kullanıcı hedefi kapsamı, tüm erişilebilir kuruluşların bağımsız tam yedeği anlamına gelmez. Eski inventory dosyaları dışlanan depoları anabilir; teslimin gerçek kapsamı DELIVERY-COVERAGE.json dosyasıdır.
+Teslim job'undaki hata sonrası Re-run failed jobs güvenli checkpoint'i kullanabilir. Toplama+tarama aşamasında arşiv teslim edilememişse hosted runner diski kalıcı olmadığından yeniden toplamak gerekebilir. Ham/withheld veri sırf checkpoint için artifact'e yüklenmez.
 
-## Yeniden deneme
-Teslim kontrolü başarısızsa Re-run failed jobs mevcut güvenli checkpoint'i kullanır; yeniden capture gerekmez. Capture+scan başarısızsa GitHub-hosted disk kalıcı olmadığından yeniden veri toplamak gerekebilir. Kontrolden geçmemiş/withheld veri sadece yeniden deneme kolaylığı için artifact'e yüklenmez. Her aşamanın koşulsuz kalıcı tutulduğu iddia edilmez.
-
-Ham loglar yayımlanmaz. İlerleme her 30 saniyede Actions loguna sayaç olarak yazılır; on dakika değişim yoksa uyarı verilir. Yedekleme komutu dört saatte durdurulur. 7z parolayı alt süreç argümanında kullandığından yalnız güvenilir, tek kiracılı hosted runner kullanılmalıdır. Symlink/özel dosyalar reddedilir. Şifresiz ZIP tüm Unix metadata'sını korumaz.
-
-Eski self-hosted kullanım belgeleri ve yardımcı dosyalar bu sürüm için geçerli değildir; etkin workflow `.github/workflows/backup.yml` ve bu README'dir. Workflow çıkış yapmaz veya OAuth grant iptal etmez.
-
-## Best-effort devam davranışı
-Strict uyarı modu kaldırılmıştır. Toplama hatası sonrası bir 7z aday kaldıysa bağımsız tarama yapılır; aday yoksa tarama başarısızlığı raporlanır. Bir hesabın hatası diğerini durdurmaz. Güvensiz/bozuk veri yayınlanmaz; tüm hataları görmezden gelip tam başarı iddia edilmez.
+Workflow çıkış yapmaz, OAuth grant iptal etmez ve repo görünürlüğünü değiştirmez. 7z parola argümanı kullandığından güvenilir, tek kiracılı hosted runner kullanılmalıdır. Symlink/özel dosyalar reddedilir. ZIP tüm Unix metadata'sını korumaz.
