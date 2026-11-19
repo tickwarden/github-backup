@@ -36,9 +36,9 @@ jobs:
           ARCHIVE_PASSWORD: ''
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y git git-lfs gnupg python3-venv jq curl rsync
+          sudo apt-get install -y git git-lfs p7zip-full python3-venv jq curl rsync
           python3 -m venv "$RUNNER_TEMP/tools"
-          "$RUNNER_TEMP/tools/bin/pip" install 'github-backup==0.67.0'
+          "$RUNNER_TEMP/tools/bin/pip" install 'github-backup==0.67.0' 'py7zr==1.0.0'
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
       - name: Yetki ve hesap kontrolü
         run: |
@@ -52,11 +52,8 @@ jobs:
         run: python3 -u scripts/run-with-progress.py
       - name: Şifre çözme ve temel sızıntı kontrolü
         timeout-minutes: 60
-        run: python3 scripts/verify.py
-      - name: İstenmişse şifresiz ZIP üret ve CRC kontrolü yap
-        if: ${{ inputs.plaintext_zip }}
-        timeout-minutes: 30
-        run: python3 scripts/plaintext-zip.py
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" scripts/verify.py
       - name: Yalnızca kontrolü geçen şifreli çıktıyı sakla
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
