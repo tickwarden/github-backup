@@ -1,5 +1,6 @@
 """Print safe counters to Actions stdout, never raw backup output."""
 import os
+import json
 import signal
 import subprocess
 import time
@@ -18,7 +19,7 @@ out.mkdir(exist_ok=True)
 command = ['timeout', '--signal=TERM', '--kill-after=30s', '4h', 'bash',
            'scripts/backup-org.sh', '--org', account, '--kind', 'user',
            '--backup-dir', str(work), '--out-dir', str(out),
-           '--encrypt', '7z', '--keep', '999999', '--no-source', '--strict']
+           '--encrypt', '7z', '--keep', '999999', '--no-source']
 started = time.monotonic()
 previous = None
 last_change = started
@@ -76,8 +77,13 @@ try:
                 pass
         report(final=True)
         print(f'[{account}] Exit code: {rc}', flush=True)
+        (root / ('COLLECTION-' + account + '.json')).write_text(json.dumps({'exit_code': rc, 'strict_mode': False, 'complete_collection_verified': False}))
         if rc:
-            print('::error::Backup failed or timed out; artifact publication blocked. Raw log not printed.', flush=True)
+            candidates = list(out.glob('*.7z'))
+            if len(candidates) == 1:
+                print('::warning::Collection returned nonzero; candidate archive will be independently checked as PARTIAL, not blindly published.', flush=True)
+                raise SystemExit(0)
+            print('::warning::No usable candidate from this account; other account jobs remain independent. Validation will record the failure.', flush=True)
         raise SystemExit(rc if rc >= 0 else 1)
 except KeyboardInterrupt:
     print(f'[{account}] Cancellation received.', flush=True)

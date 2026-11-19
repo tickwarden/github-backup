@@ -68,9 +68,17 @@ if __name__=='__main__':unittest.main()
 class WorkflowTests(unittest.TestCase):
  def setUp(self):self.workflow=(P/'.github/workflows/backup.yml').read_text()
  def test_hosted_only(self):self.assertNotIn('self-hosted',self.workflow);self.assertEqual(self.workflow.count('runs-on: ubuntu-24.04'),5)
- def test_private_guard(self):self.assertEqual(self.workflow.count('REPOSITORY_PRIVATE:'),2)
+ def test_no_private_requirement(self):self.assertNotIn('Backup publication blocked: this repository is public',self.workflow);self.assertEqual(self.workflow.count('REPOSITORY_PRIVATE:'),2)
  def test_no_summary_dependency(self):self.assertNotIn('GITHUB_STEP_SUMMARY',self.workflow)
  def test_no_secret_in_plain_yaml(self):self.assertNotIn(TOKEN,self.workflow);self.assertNotIn(PASSWORD,self.workflow)
  def test_two_independent_chains(self):self.assertIn('needs: tick_backup_scan',self.workflow);self.assertIn('needs: iron_backup_scan',self.workflow)
  def test_checkpoint_after_scan(self):self.assertLess(self.workflow.index('scripts/verify.py'),self.workflow.index('name: checked-checkpoint-'))
- def test_zip_opt_in(self):self.assertIn('default: false',self.workflow);self.assertIn('if: ${{ inputs.plaintext_zip }}',self.workflow)
+ def test_zip_opt_in(self):self.assertIn('default: false',self.workflow);self.assertIn('if: ${{ inputs.plaintext_zip && github.event.repository.private }}',self.workflow)
+
+class BestEffortTests(unittest.TestCase):
+ def test_not_strict(self):
+  self.assertNotIn("'--strict'", (P/'scripts/run-with-progress.py').read_text())
+ def test_collection_step_continues(self):
+  self.assertEqual((P/'.github/workflows/backup.yml').read_text().count('continue-on-error: true'),2)
+ def test_public_plaintext_disabled(self):
+  self.assertIn('PLAINTEXT_ZIP: ${{ inputs.plaintext_zip && github.event.repository.private }}',(P/'.github/workflows/backup.yml').read_text())

@@ -8,7 +8,7 @@ Bu sürüm GitHub-hosted Ubuntu 24.04 üzerinde çalışır; self-hosted runner 
 3. Yalnız kontrolden geçen çıktı için güvenli artifact checkpoint.
 4. Ayrı teslim job'unda checkpoint indirme ve SHA-256 kontrolü.
 
-**Yedekleme yalnız özel repoda başlar.** Public repoda özel kod, depo isimleri veya şifresiz ZIP yayımlanmaması için capture engellenir. Testler public repoda çalışabilir. Repo görünürlüğü workflow tarafından değiştirilmez.
+**Private repo zorunlu değildir.** Public repoda şifreli 7z otomatik üretilir; şifresiz ZIP uyarıyla atlanır. Public tarama raporunda özel repository birim adları hash olarak gösterilir. Repo görünürlüğü değiştirilmez.
 
 Secrets: TICKWARDEN_BACKUP_TOKEN, IRONCREST_BACKUP_TOKEN, TICKWARDEN_BACKUP_PASSPHRASE, IRONCREST_BACKUP_PASSPHRASE. Parolalar en az 20 karakter. Mevcut secret'lar korunur.
 
@@ -27,3 +27,6 @@ Teslim kontrolü başarısızsa Re-run failed jobs mevcut güvenli checkpoint'i 
 Ham loglar yayımlanmaz. İlerleme her 30 saniyede Actions loguna sayaç olarak yazılır; on dakika değişim yoksa uyarı verilir. Yedekleme komutu dört saatte durdurulur. 7z parolayı alt süreç argümanında kullandığından yalnız güvenilir, tek kiracılı hosted runner kullanılmalıdır. Symlink/özel dosyalar reddedilir. Şifresiz ZIP tüm Unix metadata'sını korumaz.
 
 Eski self-hosted kullanım belgeleri ve yardımcı dosyalar bu sürüm için geçerli değildir; etkin workflow `.github/workflows/backup.yml` ve bu README'dir. Workflow çıkış yapmaz veya OAuth grant iptal etmez.
+
+## Best-effort devam davranışı
+Strict uyarı modu kaldırılmıştır. Toplama hatası sonrası bir 7z aday kaldıysa bağımsız tarama yapılır; aday yoksa tarama başarısızlığı raporlanır. Bir hesabın hatası diğerini durdurmaz. Güvensiz/bozuk veri yayınlanmaz; tüm hataları görmezden gelip tam başarı iddia edilmez.

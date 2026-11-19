@@ -118,6 +118,8 @@ def main():
     reportdir = root / ('report-' + account)
     reportdir.mkdir(exist_ok=True, mode=0o700)
     stage = 'open'
+    collection_file = root / ('COLLECTION-' + account + '.json')
+    collection = json.loads(collection_file.read_text()) if collection_file.exists() else {'exit_code': 0, 'complete_collection_verified': False}
     report = {'account': account, 'findings': [], 'complete_backup_verified': False,
               'status': 'blocked', 'full_git_history_secret_audit': False,
               'scope': 'user target only; accessible organizations not independently enumerated',
@@ -194,13 +196,14 @@ def main():
             retained = [p for p in data.rglob('*') if p.is_file()]
             if not retained:
                 raise Blocked('NO_SAFE_FILES')
-            report.update(status='partial' if withheld else 'passed_basic_checks',
+            report.update(status='partial' if withheld or collection.get('exit_code') != 0 else 'passed_basic_checks',
+                          collection_result=collection,
                           retained_file_count=len(retained),
                           coverage_warning='Withheld units are NOT backed up. Original inventory files may mention excluded units; this report controls delivered coverage.')
             (data / 'DELIVERY-COVERAGE.json').write_text(json.dumps(report, indent=2))
             staged = tmp / 'approved'
             staged.mkdir()
-            label = '-PARTIAL' if withheld else '-CHECKED'
+            label = '-PARTIAL' if withheld or collection.get('exit_code') != 0 else '-CHECKED'
             output = staged / (account + label + '.7z')
             result = subprocess.run(['7z', 'a', '-t7z', '-mhe=on', '-p' + password, '-bd', str(output), '.'],
                                     cwd=data, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -238,7 +241,17 @@ def main():
         print('::error::Verification blocked: stage=' + stage + '; code=' + code + '. No backup artifact published.', flush=True)
         raise SystemExit(1) from None
     finally:
-        (reportdir / 'SCAN-REPORT.json').write_text(json.dumps(report, indent=2))
+        public_report = json.loads(json.dumps(report))
+        if os.environ.get('PUBLIC_REPOSITORY', '').lower() == 'true':
+            # Public artifacts must not disclose names of withheld private repositories.
+            for f in public_report.get('findings', []):
+                if f.get('unit'):
+                    f['unit_sha256'] = hashlib.sha256(f.pop('unit').encode()).hexdigest()
+            if 'withheld_repository_units' in public_report:
+                units = public_report.pop('withheld_repository_units')
+                public_report['withheld_unit_count'] = len(units)
+                public_report['withheld_unit_hashes'] = [hashlib.sha256(u.encode()).hexdigest() for u in units]
+        (reportdir / 'SCAN-REPORT.json').write_text(json.dumps(public_report, indent=2))
 
 if __name__ == '__main__':
     main()

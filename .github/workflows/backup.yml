@@ -36,15 +36,15 @@ jobs:
       ACCOUNT: tickwarden
       GH_TOKEN: ${{ secrets.TICKWARDEN_BACKUP_TOKEN }}
       ARCHIVE_PASSWORD: ${{ secrets.TICKWARDEN_BACKUP_PASSPHRASE }}
-      PLAINTEXT_ZIP: ${{ inputs.plaintext_zip }}
+      PLAINTEXT_ZIP: ${{ inputs.plaintext_zip && github.event.repository.private }}
+      PUBLIC_REPOSITORY: ${{ !github.event.repository.private }}
     steps:
-      - name: Özel yedekler için repo gizliliğini kontrol et
+      - name: Yayın biçimini bildir — görünürlük zorunluluğu yok
         env:
           REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
         run: |
           if [ "$REPOSITORY_PRIVATE" != true ]; then
-            echo '::error::Backup publication blocked: this repository is public. Use a private repository. No capture started.'
-            exit 1
+            echo '::warning::Public repository: encrypted 7z enabled; unencrypted ZIP skipped. No visibility change required.'
           fi
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -67,6 +67,8 @@ jobs:
           actual="$(gh api user --jq .login)"
           test "${actual,,}" = "${ACCOUNT,,}"
       - name: Yedekle — 30 saniyede bir güvenli ilerleme logu
+        id: capture
+        continue-on-error: true
         timeout-minutes: 245
         run: python3 -u scripts/run-with-progress.py
       - name: Doğrula — bulgulu depoları bütün olarak ayır
@@ -81,7 +83,7 @@ jobs:
           retention-days: 7
           compression-level: 0
       - name: İstenmişse güvenli ZIP checkpoint
-        if: ${{ inputs.plaintext_zip }}
+        if: ${{ inputs.plaintext_zip && github.event.repository.private }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: UNENCRYPTED-checkpoint-tickwarden-${{ github.run_id }}-${{ github.run_attempt }}
@@ -130,15 +132,15 @@ jobs:
       ACCOUNT: IronCrest-sudo
       GH_TOKEN: ${{ secrets.IRONCREST_BACKUP_TOKEN }}
       ARCHIVE_PASSWORD: ${{ secrets.IRONCREST_BACKUP_PASSPHRASE }}
-      PLAINTEXT_ZIP: ${{ inputs.plaintext_zip }}
+      PLAINTEXT_ZIP: ${{ inputs.plaintext_zip && github.event.repository.private }}
+      PUBLIC_REPOSITORY: ${{ !github.event.repository.private }}
     steps:
-      - name: Özel yedekler için repo gizliliğini kontrol et
+      - name: Yayın biçimini bildir — görünürlük zorunluluğu yok
         env:
           REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
         run: |
           if [ "$REPOSITORY_PRIVATE" != true ]; then
-            echo '::error::Backup publication blocked: this repository is public. Use a private repository. No capture started.'
-            exit 1
+            echo '::warning::Public repository: encrypted 7z enabled; unencrypted ZIP skipped. No visibility change required.'
           fi
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -161,6 +163,8 @@ jobs:
           actual="$(gh api user --jq .login)"
           test "${actual,,}" = "${ACCOUNT,,}"
       - name: Yedekle — 30 saniyede bir güvenli ilerleme logu
+        id: capture
+        continue-on-error: true
         timeout-minutes: 245
         run: python3 -u scripts/run-with-progress.py
       - name: Doğrula — bulgulu depoları bütün olarak ayır
@@ -175,7 +179,7 @@ jobs:
           retention-days: 7
           compression-level: 0
       - name: İstenmişse güvenli ZIP checkpoint
-        if: ${{ inputs.plaintext_zip }}
+        if: ${{ inputs.plaintext_zip && github.event.repository.private }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: UNENCRYPTED-checkpoint-IronCrest-sudo-${{ github.run_id }}-${{ github.run_attempt }}
