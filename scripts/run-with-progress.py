@@ -18,7 +18,7 @@ out.mkdir(exist_ok=True)
 command = ['timeout', '--signal=TERM', '--kill-after=30s', '4h', 'bash',
            'scripts/backup-org.sh', '--org', account, '--kind', 'user',
            '--backup-dir', str(work), '--out-dir', str(out),
-           '--encrypt', 'gpg', '--keep', '999999', '--no-source', '--strict']
+           '--encrypt', '7z', '--keep', '999999', '--no-source', '--strict']
 started = time.monotonic()
 previous = None
 last_change = started
