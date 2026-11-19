@@ -1,0 +1,82 @@
+name: GitHub hesap yedekleri
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: private-account-backup
+  cancel-in-progress: false
+jobs:
+  backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        account: [tickwarden, IronCrest-sudo]
+    env:
+      GH_TOKEN: ${{ matrix.account == 'tickwarden' && secrets.TICKWARDEN_BACKUP_TOKEN || secrets.IRONCREST_BACKUP_TOKEN }}
+      ARCHIVE_PASSWORD: ${{ matrix.account == 'tickwarden' && secrets.TICKWARDEN_BACKUP_PASSPHRASE || secrets.IRONCREST_BACKUP_PASSPHRASE }}
+      ACCOUNT: ${{ matrix.account }}
+    steps:
+      - name: Workflow dosyalarını al
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Bağımlılıklar
+        env:
+          GH_TOKEN: ''
+          ARCHIVE_PASSWORD: ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y git git-lfs gnupg python3-venv jq curl rsync
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install 'github-backup==0.67.0'
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+      - name: Yetki ve hesap kontrolü
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN" || { echo 'Hesap token secret eksik'; exit 1; }
+          test "${#ARCHIVE_PASSWORD}" -ge 20 || { echo 'En az 20 karakterlik parola secret gerekli'; exit 1; }
+          actual="$(gh api user --jq .login)"
+          test "${actual,,}" = "${ACCOUNT,,}" || { echo 'Token yanlış hesaba ait'; exit 1; }
+      - name: Yedekle (en fazla 4 saat)
+        timeout-minutes: 245
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/backup-$ACCOUNT" "$RUNNER_TEMP/out-$ACCOUNT"
+          # Ham günlükleri Actions konsoluna veya artifact'e göndermeyin.
+          set +e
+          timeout --signal=TERM --kill-after=30s 4h bash scripts/backup-org.sh \
+            --org "$ACCOUNT" --kind user \
+            --backup-dir "$RUNNER_TEMP/backup-$ACCOUNT" \
+            --out-dir "$RUNNER_TEMP/out-$ACCOUNT" \
+            --encrypt gpg --keep 999999 --no-source --strict \
+            > "$RUNNER_TEMP/raw-$ACCOUNT.log" 2>&1
+          rc=$?
+          set -e
+          echo "Yedekleme çıkış kodu: $rc" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo 'Yedekleme başarısız veya zaman aşımı. Arşiv yayımlanmayacak.'
+            exit "$rc"
+          fi
+      - name: Şifre çözme ve temel sızıntı kontrolü
+        timeout-minutes: 60
+        run: python3 scripts/verify.py
+      - name: Yalnızca kontrolü geçen şifreli çıktıyı sakla
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: encrypted-backup-${{ matrix.account }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/approved-${{ matrix.account }}/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Yerel geçici çıktıları temizle
+        if: always()
+        env:
+          GH_TOKEN: ''
+          ARCHIVE_PASSWORD: ''
+        run: |
+          rm -rf -- "$RUNNER_TEMP/backup-$ACCOUNT" "$RUNNER_TEMP/out-$ACCOUNT" "$RUNNER_TEMP/approved-$ACCOUNT"
+          rm -f -- "$RUNNER_TEMP/raw-$ACCOUNT.log"
