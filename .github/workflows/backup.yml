@@ -1,4 +1,9 @@
+# AI KATKI BİLDİRİMİ: Bu workflow dosyası Claude (Anthropic) yardımıyla yeniden
+# düzenlendi: iki hesap için kopyalanan job'lar tek matrix job'a indirildi, izleme
+# betiği sadeleştirildi, gizli değerler adım düzeyine daraltıldı ve `--no-source`
+# argümanı kaldırıldı. Orijinal tasarım ve gereksinimler repo sahibine aittir.
 name: GitHub hesap yedekleri
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,293 +11,243 @@ on:
         description: 'Şifresiz ZIP de üret (özel kod içerir)'
         type: boolean
         default: false
+
 permissions:
   contents: read
+
 concurrency:
   group: hosted-private-backup
   cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  tick_backup_scan:
-    name: tickwarden — yedekle ve güvenlik kontrolü
+  backup:
+    name: ${{ matrix.account }} — yedekle ve güvenlik kontrolü
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - account: tickwarden
+            token_secret: TICKWARDEN_BACKUP_TOKEN
+            passphrase_secret: TICKWARDEN_BACKUP_PASSPHRASE
+          - account: IronCrest-sudo
+            token_secret: IRONCREST_BACKUP_TOKEN
+            passphrase_secret: IRONCREST_BACKUP_PASSPHRASE
+    # Sırlar burada DEĞİL, yalnız ihtiyaç duyan adımlarda tanımlı:
+    # üçüncü taraf action'lar (checkout, upload-artifact) token'ı görmez.
     env:
-      ACCOUNT: tickwarden
-      GH_TOKEN: ${{ secrets.TICKWARDEN_BACKUP_TOKEN }}
-      ARCHIVE_PASSWORD: ${{ secrets.TICKWARDEN_BACKUP_PASSPHRASE }}
+      ACCOUNT: ${{ matrix.account }}
       PLAINTEXT_ZIP: ${{ inputs.plaintext_zip && github.event.repository.private }}
       PUBLIC_REPOSITORY: ${{ !github.event.repository.private }}
     steps:
       - name: Yayın biçimini bildir — görünürlük zorunluluğu yok
-        env:
-          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        if: ${{ !github.event.repository.private }}
         run: |
-          if [ "$REPOSITORY_PRIVATE" != true ]; then
-            echo '::warning::Public repository: encrypted 7z enabled; unencrypted ZIP skipped. No visibility change required.'
-          fi
+          echo '::warning::Public repository: encrypted 7z enabled; unencrypted ZIP skipped. No visibility change required.'
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+
       - name: Bağımlılıklar
-        env:
-          GH_TOKEN: ''
-          ARCHIVE_PASSWORD: ''
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y p7zip-full git-lfs jq curl rsync python3-venv
+          # Runner imajında zaten olanları atla; apt yalnız eksik varsa çalışır.
+          pkgs=()
+          for pair in 7z:p7zip-full git-lfs:git-lfs jq:jq curl:curl rsync:rsync; do
+            command -v "${pair%%:*}" >/dev/null || pkgs+=("${pair##*:}")
+          done
+          python3 -c 'import ensurepip, venv' 2>/dev/null || pkgs+=(python3-venv)
+          if ((${#pkgs[@]})); then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends "${pkgs[@]}"
+          fi
           python3 -m venv "$RUNNER_TEMP/tools"
-          "$RUNNER_TEMP/tools/bin/pip" install github-backup==0.67.0 py7zr==1.0.0
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet --disable-pip-version-check --no-input \
+            github-backup==0.67.0 py7zr==1.0.0
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+
       - name: Hesap kontrolü
+        env:
+          GH_TOKEN: ${{ secrets[matrix.token_secret] }}
+          ARCHIVE_PASSWORD: ${{ secrets[matrix.passphrase_secret] }}
         run: |
-          set -euo pipefail
           test -n "$GH_TOKEN"
           test "${#ARCHIVE_PASSWORD}" -ge 20
           actual="$(gh api user --jq .login)"
           test "${actual,,}" = "${ACCOUNT,,}"
+
       - name: Yedekle — 30 saniyede bir güvenli ilerleme logu
         id: capture
         continue-on-error: true
         timeout-minutes: 245
+        env:
+          GH_TOKEN: ${{ secrets[matrix.token_secret] }}
+          ARCHIVE_PASSWORD: ${{ secrets[matrix.passphrase_secret] }}
         run: |
           python3 -u - <<'PYTHON'
-          import os, json, subprocess, time, re, signal
+          import json, os, re, signal, stat, subprocess, time
           from pathlib import Path
+
           os.umask(0o077)
-          a=os.environ['ACCOUNT']; root=Path(os.environ['RUNNER_TEMP'])
-          work=root/('backup-'+a); out=root/('out-'+a); log=root/('raw-'+a+'.log')
-          work.mkdir(exist_ok=True); out.mkdir(exist_ok=True)
-          cmd=['timeout','--signal=TERM','--kill-after=30s','4h','bash','scripts/backup-org.sh','--org',a,'--kind','user','--backup-dir',str(work),'--out-dir',str(out),'--encrypt','7z','--keep','999999','--no-source']
-          start=time.monotonic(); offset=0; resource='starting'; last_change=start; old=None
-          with log.open('wb') as output:
-              child=subprocess.Popen(cmd,stdout=output,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL,start_new_session=True)
+          acct = os.environ['ACCOUNT']
+          root = Path(os.environ['RUNNER_TEMP'])
+          work, out, log = root / f'backup-{acct}', root / f'out-{acct}', root / f'raw-{acct}.log'
+          work.mkdir(exist_ok=True)
+          out.mkdir(exist_ok=True)
+
+          cmd = [
+              'timeout', '--signal=TERM', '--kill-after=30s', '4h',
+              'bash', 'scripts/backup-org.sh',
+              '--org', acct, '--kind', 'user',
+              '--backup-dir', str(work), '--out-dir', str(out),
+              '--encrypt', '7z', '--keep', '999999',
+          ]
+
+          # Yalnız bilinen etiketler ve sayılar loga yazılır; ham metin/URL runner'dan çıkmaz.
+          LABELS = ('cloning', 'issues', 'pull requests', 'discussions', 'milestones',
+                    'security advisories', 'labels', 'releases', 'gists', 'encrypt', 'archive')
+          STATUS = re.compile(r'(?:HTTP[ /:]+|API Error: *)([1-5][0-9]{2})', re.I)
+
+
+          def tree_stats():
+              files = size = 0
+              for directory in (work, out):
+                  for base, _, names in os.walk(directory, followlinks=False):
+                      for name in names:
+                          try:
+                              st = os.lstat(os.path.join(base, name))
+                          except OSError:
+                              continue
+                          if stat.S_ISREG(st.st_mode):
+                              files += 1
+                              size += st.st_size
+              return files, size
+
+
+          rc = -1
+          resource = 'starting'
+          buf = ''
+          start = last_change = time.monotonic()
+          prev = None
+
+          with log.open('wb') as sink:
+              child = subprocess.Popen(cmd, stdout=sink, stderr=subprocess.STDOUT,
+                                       stdin=subprocess.DEVNULL, start_new_session=True)
               try:
-                  while True:
-                      counts=0; size=0
-                      for directory in (work,out):
-                          for base,dirs,files in os.walk(directory,followlinks=False):
-                              for name in files:
-                                  path=Path(base)/name
-                                  try:
-                                      if not path.is_symlink(): counts+=1; size+=path.stat().st_size
-                                  except OSError: pass
-                      with log.open('rb') as inp:
-                          inp.seek(offset); text=inp.read().decode(errors='replace'); offset=inp.tell()
-                      # Only known labels/numbers are emitted; raw text/URLs never leave the runner.
-                      for line in text.splitlines():
-                          low=line.lower()
-                          for label in ('cloning','issues','pull requests','discussions','milestones','security advisories','labels','releases','gists','encrypt','archive'):
-                              if label in low: resource=label
-                          statuses=re.findall(r'(?:HTTP[ /:]+|API Error: *)([1-5][0-9]{2})',line,re.I)
-                          if statuses: print('HTTP_STATUS '+','.join(statuses)+' resource='+resource,flush=True)
-                          if 'retry' in low or 'rate limit' in low: print('NETWORK_EVENT retry_or_rate_limit resource='+resource,flush=True)
-                          if 'error' in low or 'failed' in low: print('COLLECTION_EVENT error resource='+resource+' (raw details kept private)',flush=True)
-                      state=(counts,size,offset)
-                      if state!=old: old=state; last_change=time.monotonic()
-                      age=max(0,int(time.time()-log.stat().st_mtime))
-                      print(f'[{a}] stage={resource} elapsed={int(time.monotonic()-start)}s files={counts} MiB={size/1048576:.2f} log_age={age}s unchanged={int(time.monotonic()-last_change)}s',flush=True)
-                      try: rc=child.wait(timeout=30); break
-                      except subprocess.TimeoutExpired: pass
+                  with log.open('rb') as reader:
+                      while True:
+                          buf += reader.read().decode(errors='replace')
+                          *lines, buf = buf.split('\n')
+                          for line in lines:
+                              low = line.lower()
+                              for label in LABELS:
+                                  if label in low:
+                                      resource = label
+                              codes = STATUS.findall(line)
+                              if codes:
+                                  print(f"HTTP_STATUS {','.join(codes)} resource={resource}", flush=True)
+                              if 'retry' in low or 'rate limit' in low:
+                                  print(f'NETWORK_EVENT retry_or_rate_limit resource={resource}', flush=True)
+                              if 'error' in low or 'failed' in low:
+                                  print(f'COLLECTION_EVENT error resource={resource} (raw details kept private)', flush=True)
+
+                          files, size = tree_stats()
+                          if (files, size) != prev:
+                              prev, last_change = (files, size), time.monotonic()
+                          now = time.monotonic()
+                          age = max(0, int(time.time() - log.stat().st_mtime))
+                          print(f'[{acct}] stage={resource} elapsed={int(now - start)}s files={files} '
+                                f'MiB={size / 1048576:.2f} log_age={age}s unchanged={int(now - last_change)}s',
+                                flush=True)
+                          try:
+                              rc = child.wait(timeout=30)
+                              break
+                          except subprocess.TimeoutExpired:
+                              pass
               finally:
                   if child.poll() is None:
-                      os.killpg(child.pid,signal.SIGTERM)
-                      try: child.wait(timeout=5)
-                      except subprocess.TimeoutExpired: os.killpg(child.pid,signal.SIGKILL); child.wait()
-          (root/('COLLECTION-'+a+'.json')).write_text(json.dumps({'exit_code':rc,'strict_mode':False,'complete_collection_verified':False}))
-          print('COLLECTION_EXIT '+str(rc)+' candidates='+str(len(list(out.glob('*.7z')))),flush=True)
-          if rc: print('::warning::Collection returned nonzero; verification decides whether any safe partial output can be delivered.',flush=True)
+                      os.killpg(child.pid, signal.SIGTERM)
+                      try:
+                          child.wait(timeout=5)
+                      except subprocess.TimeoutExpired:
+                          os.killpg(child.pid, signal.SIGKILL)
+                          child.wait()
+
+          (root / f'COLLECTION-{acct}.json').write_text(json.dumps(
+              {'exit_code': rc, 'strict_mode': False, 'complete_collection_verified': False}))
+          print(f"COLLECTION_EXIT {rc} candidates={len(list(out.glob('*.7z')))}", flush=True)
+          if rc:
+              print('::warning::Collection returned nonzero; verification decides whether any safe partial output can be delivered.', flush=True)
           PYTHON
+
       - name: Doğrula — bulgulu depoları bütün olarak ayır
         timeout-minutes: 90
+        env:
+          GH_TOKEN: ${{ secrets[matrix.token_secret] }}
+          ARCHIVE_PASSWORD: ${{ secrets[matrix.passphrase_secret] }}
         run: '"$RUNNER_TEMP/tools/bin/python" -u scripts/verify.py'
+
       - name: Güvenli checkpoint — yalnız kontrolden geçen şifreli veri
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: checked-checkpoint-tickwarden-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/approved-tickwarden/
+          name: checked-checkpoint-${{ matrix.account }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/approved-${{ matrix.account }}/
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
       - name: İstenmişse güvenli ZIP checkpoint
         if: ${{ inputs.plaintext_zip && github.event.repository.private }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: UNENCRYPTED-checkpoint-tickwarden-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/plaintext-tickwarden/
+          name: UNENCRYPTED-checkpoint-${{ matrix.account }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/plaintext-${{ matrix.account }}/
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+
       - name: İçerik içermeyen tarama raporu
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: scan-report-tickwarden-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/report-tickwarden/
+          name: scan-report-${{ matrix.account }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/report-${{ matrix.account }}/
           if-no-files-found: ignore
           retention-days: 7
+
       - name: Geçici özel dosyaları temizle
         if: ${{ always() }}
         run: |
-          rm -rf -- "$RUNNER_TEMP/backup-$ACCOUNT" "$RUNNER_TEMP/out-$ACCOUNT" "$RUNNER_TEMP/approved-$ACCOUNT" "$RUNNER_TEMP/plaintext-$ACCOUNT"
+          rm -rf -- "$RUNNER_TEMP/backup-$ACCOUNT" "$RUNNER_TEMP/out-$ACCOUNT" \
+                    "$RUNNER_TEMP/approved-$ACCOUNT" "$RUNNER_TEMP/plaintext-$ACCOUNT"
           rm -f -- "$RUNNER_TEMP/raw-$ACCOUNT.log"
-  tick_publish:
-    name: tickwarden — ayrı job ile teslim kontrolü
-    needs: tick_backup_scan
+
+  publish:
+    name: ${{ matrix.account }} — ayrı job ile teslim kontrolü
+    needs: backup
+    # Bir hesap başarısız olsa bile diğerinin teslim kontrolü çalışsın.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        account: [tickwarden, IronCrest-sudo]
     steps:
       - name: Kontrolden geçmiş checkpoint'i al
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: checked-checkpoint-tickwarden-${{ github.run_id }}-*
+          pattern: checked-checkpoint-${{ matrix.account }}-${{ github.run_id }}-*
           path: delivery
           merge-multiple: true
+
       - name: SHA-256 ve kapsamı logda doğrula
-        shell: bash
         run: |
-          set -euo pipefail
-          cd delivery
-          sha256sum -c -- *.sha256
-          python3 -c 'import json; d=json.load(open("COVERAGE.json")); print("Coverage:", d["status"], "Withheld repositories:", len(d.get("withheld_repository_units", [])), "Full backup verified:", d["complete_backup_verified"])'
-  iron_backup_scan:
-    name: IronCrest-sudo — yedekle ve güvenlik kontrolü
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
-    env:
-      ACCOUNT: IronCrest-sudo
-      GH_TOKEN: ${{ secrets.IRONCREST_BACKUP_TOKEN }}
-      ARCHIVE_PASSWORD: ${{ secrets.IRONCREST_BACKUP_PASSPHRASE }}
-      PLAINTEXT_ZIP: ${{ inputs.plaintext_zip && github.event.repository.private }}
-      PUBLIC_REPOSITORY: ${{ !github.event.repository.private }}
-    steps:
-      - name: Yayın biçimini bildir — görünürlük zorunluluğu yok
-        env:
-          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
-        run: |
-          if [ "$REPOSITORY_PRIVATE" != true ]; then
-            echo '::warning::Public repository: encrypted 7z enabled; unencrypted ZIP skipped. No visibility change required.'
-          fi
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Bağımlılıklar
-        env:
-          GH_TOKEN: ''
-          ARCHIVE_PASSWORD: ''
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y p7zip-full git-lfs jq curl rsync python3-venv
-          python3 -m venv "$RUNNER_TEMP/tools"
-          "$RUNNER_TEMP/tools/bin/pip" install github-backup==0.67.0 py7zr==1.0.0
-          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
-      - name: Hesap kontrolü
-        run: |
-          set -euo pipefail
-          test -n "$GH_TOKEN"
-          test "${#ARCHIVE_PASSWORD}" -ge 20
-          actual="$(gh api user --jq .login)"
-          test "${actual,,}" = "${ACCOUNT,,}"
-      - name: Yedekle — 30 saniyede bir güvenli ilerleme logu
-        id: capture
-        continue-on-error: true
-        timeout-minutes: 245
-        run: |
-          python3 -u - <<'PYTHON'
-          import os, json, subprocess, time, re, signal
-          from pathlib import Path
-          os.umask(0o077)
-          a=os.environ['ACCOUNT']; root=Path(os.environ['RUNNER_TEMP'])
-          work=root/('backup-'+a); out=root/('out-'+a); log=root/('raw-'+a+'.log')
-          work.mkdir(exist_ok=True); out.mkdir(exist_ok=True)
-          cmd=['timeout','--signal=TERM','--kill-after=30s','4h','bash','scripts/backup-org.sh','--org',a,'--kind','user','--backup-dir',str(work),'--out-dir',str(out),'--encrypt','7z','--keep','999999','--no-source']
-          start=time.monotonic(); offset=0; resource='starting'; last_change=start; old=None
-          with log.open('wb') as output:
-              child=subprocess.Popen(cmd,stdout=output,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL,start_new_session=True)
-              try:
-                  while True:
-                      counts=0; size=0
-                      for directory in (work,out):
-                          for base,dirs,files in os.walk(directory,followlinks=False):
-                              for name in files:
-                                  path=Path(base)/name
-                                  try:
-                                      if not path.is_symlink(): counts+=1; size+=path.stat().st_size
-                                  except OSError: pass
-                      with log.open('rb') as inp:
-                          inp.seek(offset); text=inp.read().decode(errors='replace'); offset=inp.tell()
-                      # Only known labels/numbers are emitted; raw text/URLs never leave the runner.
-                      for line in text.splitlines():
-                          low=line.lower()
-                          for label in ('cloning','issues','pull requests','discussions','milestones','security advisories','labels','releases','gists','encrypt','archive'):
-                              if label in low: resource=label
-                          statuses=re.findall(r'(?:HTTP[ /:]+|API Error: *)([1-5][0-9]{2})',line,re.I)
-                          if statuses: print('HTTP_STATUS '+','.join(statuses)+' resource='+resource,flush=True)
-                          if 'retry' in low or 'rate limit' in low: print('NETWORK_EVENT retry_or_rate_limit resource='+resource,flush=True)
-                          if 'error' in low or 'failed' in low: print('COLLECTION_EVENT error resource='+resource+' (raw details kept private)',flush=True)
-                      state=(counts,size,offset)
-                      if state!=old: old=state; last_change=time.monotonic()
-                      age=max(0,int(time.time()-log.stat().st_mtime))
-                      print(f'[{a}] stage={resource} elapsed={int(time.monotonic()-start)}s files={counts} MiB={size/1048576:.2f} log_age={age}s unchanged={int(time.monotonic()-last_change)}s',flush=True)
-                      try: rc=child.wait(timeout=30); break
-                      except subprocess.TimeoutExpired: pass
-              finally:
-                  if child.poll() is None:
-                      os.killpg(child.pid,signal.SIGTERM)
-                      try: child.wait(timeout=5)
-                      except subprocess.TimeoutExpired: os.killpg(child.pid,signal.SIGKILL); child.wait()
-          (root/('COLLECTION-'+a+'.json')).write_text(json.dumps({'exit_code':rc,'strict_mode':False,'complete_collection_verified':False}))
-          print('COLLECTION_EXIT '+str(rc)+' candidates='+str(len(list(out.glob('*.7z')))),flush=True)
-          if rc: print('::warning::Collection returned nonzero; verification decides whether any safe partial output can be delivered.',flush=True)
-          PYTHON
-      - name: Doğrula — bulgulu depoları bütün olarak ayır
-        timeout-minutes: 90
-        run: '"$RUNNER_TEMP/tools/bin/python" -u scripts/verify.py'
-      - name: Güvenli checkpoint — yalnız kontrolden geçen şifreli veri
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: checked-checkpoint-IronCrest-sudo-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/approved-IronCrest-sudo/
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-      - name: İstenmişse güvenli ZIP checkpoint
-        if: ${{ inputs.plaintext_zip && github.event.repository.private }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: UNENCRYPTED-checkpoint-IronCrest-sudo-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/plaintext-IronCrest-sudo/
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-      - name: İçerik içermeyen tarama raporu
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: scan-report-IronCrest-sudo-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/report-IronCrest-sudo/
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: Geçici özel dosyaları temizle
-        if: ${{ always() }}
-        run: |
-          rm -rf -- "$RUNNER_TEMP/backup-$ACCOUNT" "$RUNNER_TEMP/out-$ACCOUNT" "$RUNNER_TEMP/approved-$ACCOUNT" "$RUNNER_TEMP/plaintext-$ACCOUNT"
-          rm -f -- "$RUNNER_TEMP/raw-$ACCOUNT.log"
-  iron_publish:
-    name: IronCrest-sudo — ayrı job ile teslim kontrolü
-    needs: iron_backup_scan
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - name: Kontrolden geçmiş checkpoint'i al
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: checked-checkpoint-IronCrest-sudo-${{ github.run_id }}-*
-          path: delivery
-          merge-multiple: true
-      - name: SHA-256 ve kapsamı logda doğrula
-        shell: bash
-        run: |
-          set -euo pipefail
           cd delivery
           sha256sum -c -- *.sha256
           python3 -c 'import json; d=json.load(open("COVERAGE.json")); print("Coverage:", d["status"], "Withheld repositories:", len(d.get("withheld_repository_units", [])), "Full backup verified:", d["complete_backup_verified"])'
